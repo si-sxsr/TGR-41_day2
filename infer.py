@@ -110,6 +110,52 @@ def build_instance_map(insts, wh, min_frac=1e-5):
     return small, kept
 
 
+def refine(small, img):
+    """Snap each YOLO mask to the real bean edge on the white paper (pixel-accurate at work size).
+    Paper colour is estimated from pixels outside the predicted beans (inpainted low-res map),
+    bean pixels = darker or more coloured than paper (Otsu threshold near the beans).
+    Each instance may only grow into a thin ring around its own YOLO mask and never into a neighbour."""
+    from scipy.ndimage import find_objects
+    hw, ww = img.shape[:2]
+    lab_map = cv2.resize(small, (ww, hw), interpolation=cv2.INTER_NEAREST)
+    if lab_map.max() == 0:
+        return lab_map
+    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB).astype(np.float32)
+    s = 160 / max(hw, ww)
+    lo = cv2.resize(img, None, fx=s, fy=s, interpolation=cv2.INTER_AREA)
+    beans_lo = cv2.resize((lab_map > 0).astype(np.uint8), (lo.shape[1], lo.shape[0]), interpolation=cv2.INTER_NEAREST)
+    beans_lo = cv2.dilate(beans_lo, np.ones((5, 5), np.uint8))
+    bg = cv2.cvtColor(cv2.inpaint(lo, beans_lo, 5, cv2.INPAINT_TELEA), cv2.COLOR_BGR2LAB)
+    bg = cv2.resize(cv2.GaussianBlur(bg, (0, 0), 3), (ww, hw), interpolation=cv2.INTER_LINEAR).astype(np.float32)
+    score = np.clip(bg[..., 0] - lab[..., 0], 0, None) + 1.5 * np.sqrt(
+        (lab[..., 1] - bg[..., 1]) ** 2 + (lab[..., 2] - bg[..., 2]) ** 2)
+    score = cv2.GaussianBlur(score, (3, 3), 0)
+    near = cv2.dilate((lab_map > 0).astype(np.uint8), np.ones((15, 15), np.uint8)) > 0
+    v = np.clip(score[near], 0, 255).astype(np.uint8)
+    t, _ = cv2.threshold(v.reshape(-1, 1), 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    fg = score > max(t, 10)
+    out = np.zeros_like(lab_map)
+    for idx, sl in enumerate(find_objects(lab_map)):
+        if sl is None:
+            continue
+        i = idx + 1
+        m = lab_map == i  # full-frame bool is fine at work size; use crop for speed
+        ys, xs = sl
+        area = int(m[sl].sum())
+        r = max(2, int(0.08 * np.sqrt(area)))
+        y0, y1 = max(ys.start - r, 0), min(ys.stop + r, hw)
+        x0, x1 = max(xs.start - r, 0), min(xs.stop + r, ww)
+        mc = m[y0:y1, x0:x1].astype(np.uint8)
+        ring = cv2.dilate(mc, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))) > 0
+        others = (lab_map[y0:y1, x0:x1] > 0) & ~mc.astype(bool)
+        new = ring & fg[y0:y1, x0:x1] & ~others & (out[y0:y1, x0:x1] == 0)
+        new = cv2.morphologyEx(new.astype(np.uint8), cv2.MORPH_OPEN, np.ones((3, 3), np.uint8)) > 0
+        if new.sum() < 0.6 * area or new.sum() > 1.6 * area:
+            new = mc.astype(bool) & (out[y0:y1, x0:x1] == 0)  # refinement unreliable -> keep YOLO mask
+        out[y0:y1, x0:x1][new] = i
+    return out
+
+
 def finalize(small, kept, names, full_hw):
     """Upscale each instance on its own crop (bilinear -> smooth edges), keep the largest part,
     fill holes, and paint into the full-size map so that mask == polygon interior.
@@ -176,6 +222,7 @@ def main():
     ap.add_argument("--imgsz", type=int, default=448)
     ap.add_argument("--conf", type=float, default=0.25)
     ap.add_argument("--retina", action="store_true", help="upsample protos to work size before threshold")
+    ap.add_argument("--refine", action="store_true", help="snap mask edges to the bean/paper boundary")
     ap.add_argument("--no-vis", action="store_true")
     a = ap.parse_args()
 
@@ -209,6 +256,8 @@ def main():
         img = read_work(p, H, W)
         insts = predict_instances(model, img, a.imgsz, a.conf, a.retina)
         small, kept = build_instance_map(insts, img.shape[:2])
+        if a.refine:
+            small = refine(small, img)
         full, objs = finalize(small, kept, model.names, (H, W))
         stem = os.path.splitext(f)[0]
         if full.max() <= 255:
