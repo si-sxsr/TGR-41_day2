@@ -1,0 +1,6 @@
+path: C:/Users/ACER/OneDrive/Desktop/TGR-41_day2/dataset_rf
+train: train/images
+val: valid/images
+names:
+  0: good
+  1: shell

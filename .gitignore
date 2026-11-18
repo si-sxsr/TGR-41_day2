@@ -1,0 +1,15 @@
+# large / regenerable
+dataset/
+dataset_official/
+labels/
+yolo_data/
+runs/
+val_test/
+gt_val/
+outputs_*/
+*.pt
+!weights/*.pt
+train_log*.txt
+__pycache__/
+*.zip
+*.cache

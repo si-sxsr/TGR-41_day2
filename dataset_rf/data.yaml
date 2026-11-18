@@ -1,0 +1,13 @@
+train: ../train/images
+val: ../valid/images
+test: ../test/images
+
+nc: 2
+names: ['good', 'shell']
+
+roboflow:
+  workspace: nattawuts-workspace-6t5zs
+  project: tgrday2seg-v2
+  version: 1
+  license: CC BY 4.0
+  url: https://universe.roboflow.com/nattawuts-workspace-6t5zs/tgrday2seg-v2/dataset/1
