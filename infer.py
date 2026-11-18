@@ -18,7 +18,7 @@ import numpy as np
 
 CLASSES = ["black", "broken", "good", "husk", "immature", "parchment", "shell"]
 EXTS = (".jpg", ".jpeg", ".png")
-WORK_LONG = 1024  # decode/predict at ~1/4 of a 12 MP photo, then upscale masks to full size
+WORK_LONG = 1024  # decode at the smallest JPEG scale (1/4, 1/2) whose long side is still >= this; model input is 448
 
 
 def die(msg):
@@ -94,14 +94,14 @@ def predict_instances(model, img, imgsz, conf, retina):
     return [(cls[i], float(sc[i]), masks[i]) for i in order]
 
 
-def build_instance_map(insts, wh, min_area):
-    """Paint highest-score first at work resolution; each pixel belongs to one instance."""
-    hw, ww = wh
+def build_instance_map(insts, wh, min_frac=1e-5):
+    """Paint highest-score first at the mask resolution (no extra resize: finalize() upsamples each
+    instance to full size); each pixel belongs to one instance."""
+    hw, ww = insts[0][2].shape if insts else wh
     small = np.zeros((hw, ww), np.uint16)
+    min_area = max(3, int(min_frac * hw * ww))
     kept = []
     for c, s, m in insts:
-        if m.shape != (hw, ww):
-            m = cv2.resize(m.astype(np.uint8), (ww, hw), interpolation=cv2.INTER_NEAREST) > 0
         free = m & (small == 0)
         if free.sum() < min_area:
             continue
@@ -208,13 +208,12 @@ def main():
             die(f"cannot read image {p}: {e}")
         img = read_work(p, H, W)
         insts = predict_instances(model, img, a.imgsz, a.conf, a.retina)
-        min_area = max(10, int(1e-5 * img.shape[0] * img.shape[1]))
-        small, kept = build_instance_map(insts, img.shape[:2], min_area)
+        small, kept = build_instance_map(insts, img.shape[:2])
         full, objs = finalize(small, kept, model.names, (H, W))
         stem = os.path.splitext(f)[0]
         if full.max() <= 255:
             full = full.astype(np.uint8)  # same integer ids, half the bytes -> much faster PNG write
-        if not cv2.imwrite(os.path.join(a.out, "seg_mask", stem + ".png"), full, [cv2.IMWRITE_PNG_COMPRESSION, 1]):
+        if not cv2.imwrite(os.path.join(a.out, "seg_mask", stem + ".png"), full, [cv2.IMWRITE_PNG_COMPRESSION, 1, cv2.IMWRITE_PNG_STRATEGY, cv2.IMWRITE_PNG_STRATEGY_RLE]):
             die(f"failed to write mask for {f}")
         results.append({"image_name": f, "objects": objs})
         dt = time.perf_counter() - t0
